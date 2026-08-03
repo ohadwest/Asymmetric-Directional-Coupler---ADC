@@ -121,7 +121,7 @@ def generate_pdf_report(d, fig_bytes_dict):
     summary_data = [
         ["Parameter", "Value", "Parameter", "Value"],
         ["Core Material", f"{d['core_material']}", "Polarization", f"{d['polarization'].upper()}"],
-        ["Wavelength Range", f"{d['lambda_vec'][0]:.3f} - {d['lambda_vec']}[-1]:.3f} μm", "Central Wavelength", f"{d['lambda_center_val']:.3f} μm"],
+        ["Wavelength Range", f"{d['lambda_vec'][0]:.3f} - {d['lambda_vec'][-1]:.3f} μm", "Central Wavelength", f"{d['lambda_center_val']:.3f} μm"],
         ["Width 1 (w1)", f"{d['w1']} μm", "Width 2 (w2)", f"{d['w2']} μm"],
         ["Height (h)", f"{d['h_core']} μm", "Coupler Gap", f"{d['gap']} μm"],
         ["Pure Coupling (κ)", f"{d['kappa_pure_vec'][c_idx]:.4f} μm⁻¹", "Phase Mismatch (δ)", f"{d['delta_vec'][c_idx]:.4f} μm⁻¹"],
