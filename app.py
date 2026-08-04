@@ -7,11 +7,10 @@ import time
 import os
 import base64
 import streamlit.components.v1 as components
-from coupler_engine import run_asymmetric_simulation
+from coupler_engine import run_asymmetric_simulation, get_core_index, sellmeier_sio2
 
-# ReportLab Engine for PDF Generation
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
@@ -41,7 +40,7 @@ def inject_google_analytics(measurement_id):
 inject_google_analytics("G-7776KX662W")
 
 st.title("⚡ Photonic Directional & Ring Coupler Solver")
-st.markdown("### 2D Mode Solver & Coupled-Mode Analysis (`Si / Si3N4 / Al2O3 / SiO2`)")
+st.markdown("### 2D Mode Solver & Mismatched Coupled-Mode Analysis (`Si / Si3N4 / Al2O3 / SiO2`)")
 
 # --- SIDEBAR CONTROLS ---
 st.sidebar.header("🛠️ Coupler Configuration")
@@ -90,7 +89,6 @@ res_mode = st.sidebar.selectbox("Mesh Resolution", options=["lr (0.02μm)", "mr 
 pol_key = "ex" if "ex" in polarization else "ey"
 run_btn = st.sidebar.button("🚀 Run Simulation", type="primary", use_container_width=True)
 
-# Helper function to convert Matplotlib figure to image bytes
 def fig_to_bytes(fig):
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=300, bbox_inches="tight")
@@ -106,17 +104,14 @@ def generate_pdf_report(d, fig_bytes_dict):
     title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=18, textColor=colors.HexColor("#0F172A"), spaceAfter=10)
     subtitle_style = ParagraphStyle('SubTitleStyle', parent=styles['Normal'], fontSize=10, textColor=colors.HexColor("#475569"), spaceAfter=15)
     heading_style = ParagraphStyle('HeadingStyle', parent=styles['Heading2'], fontSize=13, textColor=colors.HexColor("#1E293B"), spaceBefore=12, spaceAfter=6)
-    body_style = ParagraphStyle('BodyStyle', parent=styles['Normal'], fontSize=9, leading=12, textColor=colors.HexColor("#334155"))
     eq_style = ParagraphStyle('EqStyle', parent=styles['Normal'], fontSize=9, leading=13, textColor=colors.HexColor("#1E1B4B"), backColor=colors.HexColor("#F1F5F9"), borderPadding=6, spaceAfter=8)
 
     elements = []
     
-    # Header
     elements.append(Paragraph("⚡ Integrated Photonics Directional Coupler Analysis Report", title_style))
     elements.append(Paragraph(f"Generated on {time.strftime('%Y-%m-%d %H:%M:%S')} | Solver: 2D SVFD Semi-Vectorial Mode Engine", subtitle_style))
     elements.append(Spacer(1, 5))
     
-    # Executive Summary Table
     c_idx = d['idx_center']
     summary_data = [
         ["Parameter", "Value", "Parameter", "Value"],
@@ -141,7 +136,6 @@ def generate_pdf_report(d, fig_bytes_dict):
     elements.append(t_sum)
     elements.append(Spacer(1, 10))
 
-    # Mathematical Framework
     elements.append(Paragraph("🔬 Mathematical Framework & Formulation", heading_style))
     eq_text = """
     <b>1. Semi-Vectorial Wave Equation:</b> ∂/∂x [ 1/n² ∂(n² E_x)/∂x ] + ∂²E_x/∂y² + k₀² n² E_x = β² E_x <br/>
@@ -153,14 +147,13 @@ def generate_pdf_report(d, fig_bytes_dict):
     elements.append(Paragraph(eq_text, eq_style))
     elements.append(Spacer(1, 10))
 
-    # Embedded Figures
     elements.append(Paragraph("📊 Field Distributions & Computed Plots", heading_style))
     
     img_w, img_h = 250, 160
     img_rows = [
         [RLImage(io.BytesIO(fig_bytes_dict['index']), width=img_w, height=img_h), RLImage(io.BytesIO(fig_bytes_dict['even']), width=img_w, height=img_h)],
         [RLImage(io.BytesIO(fig_bytes_dict['odd']), width=img_w, height=img_h), RLImage(io.BytesIO(fig_bytes_dict['cutline']), width=img_w, height=img_h)],
-        [RLImage(io.BytesIO(fig_bytes_dict['dispersion']), width=img_w, height=img_h), RLImage(io.BytesIO(fig_bytes_dict['power']), width=img_w, height=img_h)]
+        [RLImage(io.BytesIO(fig_bytes_dict['sanity']), width=img_w, height=img_h), RLImage(io.BytesIO(fig_bytes_dict['power']), width=img_w, height=img_h)]
     ]
     
     for row in img_rows:
@@ -198,7 +191,7 @@ if run_btn or 'sim_adc_results' in st.session_state:
         
         alpha_db_vals = np.array(custom_losses)
         alpha_cm = alpha_db_vals * (np.log(10) / 10.0)
-        L_ring_cm = results['L_ring_um'] * 1e-4
+        L_ring_cm = (2 * np.pi * ring_R + 2 * coupler_L) * 1e-4 if ring_R > 0 else (2 * coupler_L * 1e-4)
         round_trip_loss_pct = (1.0 - np.exp(-alpha_cm * L_ring_cm)) * 100.0
         
         neff_avg_vec = (results['neff_even'] + results['neff_odd']) / 2.0
@@ -218,7 +211,6 @@ if run_btn or 'sim_adc_results' in st.session_state:
     d = st.session_state['sim_adc_results']
     c_idx = d['idx_center']
 
-    # --- TOP METRIC CARDS ---
     m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Pure Coupling (κ)", f"{d['kappa_pure_vec'][c_idx]:.4f} μm⁻¹")
     m2.metric("Phase Mismatch (δ)", f"{d['delta_vec'][c_idx]:.4f} μm⁻¹")
@@ -228,7 +220,6 @@ if run_btn or 'sim_adc_results' in st.session_state:
 
     st.markdown("---")
     
-    # --- PLOTS GENERATION ---
     def draw_boxes(ax):
         for l, r in [(d['box1_l'], d['box1_r']), (d['box2_l'], d['box2_r'])]:
             ax.plot([l, r, r, l, l], [d['b_y'], d['b_y'], d['t_y'], d['t_y'], d['b_y']], 'k--', lw=1.5)
@@ -237,7 +228,7 @@ if run_btn or 'sim_adc_results' in st.session_state:
     im_idx = ax_idx.imshow(np.sqrt(d['eps_center']).T, origin='lower', extent=[d['xc'][0], d['xc'][-1], d['yc'][0], d['yc'][-1]], cmap='viridis', aspect='auto')
     fig_idx.colorbar(im_idx, ax=ax_idx, label='Index (n)')
     draw_boxes(ax_idx)
-    ax_idx.set_title(f"Refractive Index Distribution n(x,y)")
+    ax_idx.set_title("Refractive Index Distribution n(x,y)")
 
     fig_even, ax_even = plt.subplots(figsize=(6, 4))
     im_even = ax_even.imshow(d['phi_even'].T, origin='lower', extent=[d['xc'][0], d['xc'][-1], d['yc'][0], d['yc'][-1]], cmap='jet', vmin=0, vmax=1, aspect='auto')
@@ -269,6 +260,22 @@ if run_btn or 'sim_adc_results' in st.session_state:
     ax_neff.set_ylabel('Effective Index')
     ax_neff.set_title("Supermode Dispersion Curves n_eff(λ)")
 
+    # SANITY CHECK GRAPH
+    n_core_vec = np.array([get_core_index(lam, d['core_material']) for lam in d['lambda_vec']])
+    n_clad_vec = np.array([sellmeier_sio2(lam) for lam in d['lambda_vec']])
+
+    fig_sanity, ax_sanity = plt.subplots(figsize=(6, 4))
+    ax_sanity.plot(d['lambda_vec'], n_core_vec, 'k--', lw=2, label=f"Core Material ({d['core_material']})")
+    ax_sanity.plot(d['lambda_vec'], n_clad_vec, 'g--', lw=2, label="Cladding (SiO2)")
+    ax_sanity.plot(d['lambda_vec'], d['neff_even'], 'bo-', lw=1.5, label="Guided n_eff (Even)")
+    ax_sanity.plot(d['lambda_vec'], d['neff_odd'], 'ro-', lw=1.5, label="Guided n_eff (Odd)")
+    ax_sanity.fill_between(d['lambda_vec'], n_clad_vec, n_core_vec, color='gray', alpha=0.1, label="Allowed Mode Region")
+    ax_sanity.grid(True)
+    ax_sanity.set_xlabel('Wavelength λ [μm]')
+    ax_sanity.set_ylabel('Refractive Index (n)')
+    ax_sanity.set_title(f"Sanity Check: Bulk Materials vs. Guided n_eff")
+    ax_sanity.legend(fontsize=8, loc='best')
+
     fig_power, ax_power = plt.subplots(figsize=(7, 4))
     ax_power.plot(d['lambda_vec'], d['p_cross_vec'], 'ro-', lw=2, label='Cross Port Power P_cross')
     ax_power.plot(d['lambda_vec'], d['p_bar_vec'], 'bo-', lw=2, label='Bar Port Power P_bar')
@@ -280,7 +287,6 @@ if run_btn or 'sim_adc_results' in st.session_state:
     ax_power.legend()
     ax_power.set_title("Power Transfer Spectrum with Mismatch Limit F")
 
-    # --- EXPORT BUTTONS SECTION ---
     st.markdown("### 📥 Export Simulation Results & Summary Reports")
     
     df_results = pd.DataFrame({
@@ -299,13 +305,12 @@ if run_btn or 'sim_adc_results' in st.session_state:
     
     csv_bytes = df_results.to_csv(index=False).encode('utf-8')
     
-    # Generate Images Bytes for PDF
     fig_bytes_dict = {
         'index': fig_to_bytes(fig_idx),
         'even': fig_to_bytes(fig_even),
         'odd': fig_to_bytes(fig_odd),
         'cutline': fig_to_bytes(fig_1d),
-        'dispersion': fig_to_bytes(fig_neff),
+        'sanity': fig_to_bytes(fig_sanity),
         'power': fig_to_bytes(fig_power)
     }
     
@@ -331,8 +336,7 @@ if run_btn or 'sim_adc_results' in st.session_state:
 
     st.markdown("---")
 
-    # --- TABS FOR GRAPHICAL DISPLAY ---
-    tab1, tab2, tab3 = st.tabs(["🖼️ Cross-Sections & Modes", "📈 Dispersion & Coupling", "⚡ Power Transfer Spectrum"])
+    tab1, tab2, tab3 = st.tabs(["🖼️ Cross-Sections & Modes", "📈 Dispersion & Sanity Check", "⚡ Power Transfer Spectrum"])
 
     with tab1:
         col1, col2 = st.columns(2)
@@ -348,22 +352,12 @@ if run_btn or 'sim_adc_results' in st.session_state:
         with col3:
             st.pyplot(fig_neff)
         with col4:
-            fig_k, ax_k = plt.subplots(figsize=(6, 4))
-            ax_k.plot(d['lambda_vec'], d['kappa_pure_vec'], 'k-', lw=2, label='Pure Coupling κ')
-            ax_k.plot(d['lambda_vec'], d['delta_vec'], 'r--', lw=2, label='Phase Mismatch δ')
-            ax_k.plot(d['lambda_vec'], d['kappa_eff_vec'], 'g:', lw=2, label='Effective Coupling κ_eff')
-            ax_k.grid(True)
-            ax_k.legend()
-            ax_k.set_xlabel('Wavelength [μm]')
-            ax_k.set_ylabel('Parameter Value [μm⁻¹]')
-            ax_k.set_title("Coupling & Phase Mismatch Spectra")
-            st.pyplot(fig_k)
+            st.pyplot(fig_sanity)
 
     with tab3:
         st.pyplot(fig_power)
 
 else:
-    # --- REFERENCE BENCHMARKS PREVIEW ---
     st.info("👈 Select coupler configuration and geometry in the sidebar, then click **Run Simulation** 🚀")
     
     st.markdown("### 🔬 Reference Modal Profiles & Numerical Benchmarks 🎨")
