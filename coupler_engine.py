@@ -2,7 +2,7 @@ import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
-# --- REFRACTIVE INDEX FUNCTIONS ---
+# --- REFRACTIVE INDEX MODELS ---
 
 def sellmeier_sio2(lam_um):
     """Cladding: Thermal SiO2 Sellmeier"""
@@ -26,8 +26,8 @@ def n_al2o3(lam_um):
     """Alumina (Al2O3) Core - ALUVIA PDK Sellmeier"""
     eps_inf = 1.0
     A = 1.912
-    E = 0.09566
-    P = 0.00306
+    E = 0.09566  # in um
+    P = 0.00306  # in um^-2
     n_sq = eps_inf + (A * lam_um**2) / (lam_um**2 - E**2) - P * lam_um**2
     return np.sqrt(np.maximum(n_sq, 1.0))
 
@@ -50,7 +50,7 @@ def get_core_index(lam_um, material_name):
     else:
         return n_sin_stoch(lam_um)
 
-# --- MESH GENERATION FOR ASYMMETRIC COUPLER ---
+# --- MESH GENERATION FOR ASYMMETRIC / SYMMETRIC COUPLER ---
 
 def waveguidemesh_asymmetric(w1, w2, h_core, gap, side, bottom_ox, top_ox, dx, dy, n_core, n_clad):
     total_width = w1 + w2 + gap + 2 * side
@@ -67,7 +67,6 @@ def waveguidemesh_asymmetric(w1, w2, h_core, gap, side, bottom_ox, top_ox, dx, d
     
     eps = np.full((len(xc), len(yc)), n_clad**2)
     
-    # Coordinates of Waveguide 1 (Left) and Waveguide 2 (Right)
     x1_l = -gap / 2.0 - w1
     x1_r = -gap / 2.0
     x2_l = gap / 2.0
@@ -103,7 +102,7 @@ def single_waveguide_mesh(w_core, h_core, side, bottom_ox, top_ox, dx, dy, n_cor
     
     return xc, yc, eps
 
-# --- 2D SVFD SOLVER ---
+# --- 2D SVFD EIGENMODE SOLVER ---
 
 def svmodes_2d(lam_um, guess, nmodes, dx, dy, eps_mesh, polarization='ex'):
     nx, ny = eps_mesh.shape
@@ -187,6 +186,7 @@ def run_asymmetric_simulation(w1, w2, h_core, gap, coupler_L, ring_R, lambda_sta
     p_bar_vec = np.zeros(n_lambda)
     
     idx_center = n_lambda // 2
+    is_symmetric = abs(w1 - w2) < 1e-6
     
     for i in range(n_lambda):
         if progress_callback:
@@ -197,20 +197,22 @@ def run_asymmetric_simulation(w1, w2, h_core, gap, coupler_L, ring_R, lambda_sta
         
         n_core = get_core_index(current_lambda, core_material)
         n_clad = sellmeier_sio2(current_lambda)
-        
         guess = (n_core + n_clad) / 2.0
         
-        # 1. Single Waveguide 1
+        # 1. Isolated Waveguide 1
         _, _, eps_wg1 = single_waveguide_mesh(w1, h_core, side, bottom_ox, top_ox, dx, dy, n_core, n_clad)
         _, neff1_val = svmodes_2d(current_lambda, guess, 1, dx, dy, eps_wg1, polarization)
         neff1_vec[i] = neff1_val[0]
         
-        # 2. Single Waveguide 2
-        _, _, eps_wg2 = single_waveguide_mesh(w2, h_core, side, bottom_ox, top_ox, dx, dy, n_core, n_clad)
-        _, neff2_val = svmodes_2d(current_lambda, guess, 1, dx, dy, eps_wg2, polarization)
-        neff2_vec[i] = neff2_val[0]
+        # 2. Isolated Waveguide 2 (Skip calculation if symmetric to save CPU)
+        if is_symmetric:
+            neff2_vec[i] = neff1_vec[i]
+        else:
+            _, _, eps_wg2 = single_waveguide_mesh(w2, h_core, side, bottom_ox, top_ox, dx, dy, n_core, n_clad)
+            _, neff2_val = svmodes_2d(current_lambda, guess, 1, dx, dy, eps_wg2, polarization)
+            neff2_vec[i] = neff2_val[0]
         
-        # 3. Coupled Asymmetric System
+        # 3. Coupled System
         xc, yc, eps_mesh, x1_l, x1_r, x2_l, x2_r, y_b, y_t = waveguidemesh_asymmetric(
             w1, w2, h_core, gap, side, bottom_ox, top_ox, dx, dy, n_core, n_clad
         )
@@ -220,15 +222,13 @@ def run_asymmetric_simulation(w1, w2, h_core, gap, coupler_L, ring_R, lambda_sta
         neff_even_vec[i] = neff_vals[sorted_indices[0]]
         neff_odd_vec[i] = neff_vals[sorted_indices[1]]
         
-        # Physics Calculations for Asymmetric Coupling
+        # Phase Mismatch & Coupling Coefficients
         delta_vec[i] = (np.pi / current_lambda) * (neff1_vec[i] - neff2_vec[i])
         kappa_eff_vec[i] = (np.pi / current_lambda) * (neff_even_vec[i] - neff_odd_vec[i])
         
-        # Pure coupling kappa = sqrt(kappa_eff^2 - delta^2)
         diff_sq = kappa_eff_vec[i]**2 - delta_vec[i]**2
         kappa_pure_vec[i] = np.sqrt(np.maximum(diff_sq, 0.0))
         
-        # Power transfer fraction F = P_max
         f_max_vec[i] = (kappa_pure_vec[i] / kappa_eff_vec[i])**2 if kappa_eff_vec[i] > 0 else 0.0
         
         if ring_R > 0:
@@ -258,20 +258,6 @@ def run_asymmetric_simulation(w1, w2, h_core, gap, coupler_L, ring_R, lambda_sta
             lambda_center_val = current_lambda
             mid_y_idx = np.argmin(np.abs(yc - (y_b + y_t) / 2.0))
 
-    L_ring_um = (2 * np.pi * ring_R + 2 * coupler_L) if ring_R > 0 else (2 * coupler_L)
-    L_ring_cm = L_ring_um * 1e-4
-    alpha_db_vals = np.array([0.5, 1.5, 5.0])
-    alpha_cm = alpha_db_vals * (np.log(10) / 10.0)
-    round_trip_loss_pct = (1.0 - np.exp(-alpha_cm * L_ring_cm)) * 100.0
-    
-    neff_avg_vec = (neff_even_vec + neff_odd_vec) / 2.0
-    lambda_cm_center = lambda_center_val * 1e-4
-    dneff_dlambda = (neff_avg_vec[-1] - neff_avg_vec[0]) / ((lambda_vec[-1] - lambda_vec[0]) * 1e-4)
-    n_group = neff_avg_vec[idx_center] - lambda_cm_center * dneff_dlambda
-    
-    Q0_vals = (2.0 * np.pi * n_group) / (lambda_cm_center * alpha_cm)
-    QL_vals = Q0_vals / 2.0
-    
     return {
         'xc': xc_center, 'yc': yc_center, 'eps_center': eps_mesh_center,
         'phi_even': phi_even, 'phi_odd': phi_odd, 'mid_y_idx': mid_y_idx,
@@ -279,8 +265,7 @@ def run_asymmetric_simulation(w1, w2, h_core, gap, coupler_L, ring_R, lambda_sta
         'neff_even': neff_even_vec, 'neff_odd': neff_odd_vec,
         'delta_vec': delta_vec, 'kappa_eff_vec': kappa_eff_vec, 'kappa_pure_vec': kappa_pure_vec,
         'f_max_vec': f_max_vec, 'l_residual_vec': l_residual_vec, 'l_total_vec': l_total_vec,
-        'p_cross_vec': p_cross_vec, 'p_bar_vec': p_bar_vec, 'round_trip_loss_pct': round_trip_loss_pct,
-        'QL_vals': QL_vals, 'alpha_db_vals': alpha_db_vals, 'L_ring_um': L_ring_um,
+        'p_cross_vec': p_cross_vec, 'p_bar_vec': p_bar_vec,
         'lambda_center_val': lambda_center_val, 'idx_center': idx_center,
         'box1_l': x1_l, 'box1_r': x1_r, 'box2_l': x2_l, 'box2_r': x2_r,
         'b_y': y_b, 't_y': y_t, 'polarization': polarization,
